@@ -24,7 +24,7 @@ DEFAULT_PALETTE = _xdg("XDG_CONFIG_HOME", ".config") / "noctalia" / "colors.json
 class Config:
     address: str | None = None
     role: str = "primary"
-    mode: str = "vivid"
+    mode: str = "faithful"
     brightness: int = 255
     fade_ms: int = 1500
     step_ms: int = 50

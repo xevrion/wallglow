@@ -47,6 +47,33 @@ def test_pick_by_role_and_mode(tmp_path):
     assert palette.pick(loaded, "primary", "raw") == (0xC1, 0xC1, 0xFF)
     assert palette.pick(loaded, "primary", "vivid") == (0, 0, 255)
     assert palette.pick(loaded, "tertiary", "raw") == (0xE9, 0xB9, 0xD3)
+    assert palette.pick(loaded, "primary") == palette.faithful((0xC1, 0xC1, 0xFF))
+
+
+def test_faithful_preserves_hue_of_a_peach():
+    import colorsys
+
+    src = (0xFF, 0xB4, 0xA3)
+    out = palette.faithful(src)
+    h_src = colorsys.rgb_to_hls(*(c / 255 for c in src))[0]
+    h_out = colorsys.rgb_to_hls(*(c / 255 for c in out))[0]
+    assert abs(h_src - h_out) < 0.01
+    # stays a warm peach, not pushed to pure red-orange like vivid does
+    assert out != palette.vivid(src)
+    assert out[0] > out[1] > out[2]
+
+
+def test_faithful_leaves_an_already_good_colour_untouched():
+    assert palette.faithful((0xDB, 0xC5, 0x8C)) == (0xDB, 0xC5, 0x8C)
+
+
+def test_faithful_lifts_a_too_dark_colour():
+    r, g, b = palette.faithful((0x0B, 0x1A, 0x3A))
+    assert max(r, g, b) > 0x3A
+
+
+def test_faithful_leaves_grey_grey():
+    assert palette.faithful((0x8A, 0x8A, 0x8A)) == (0x8A, 0x8A, 0x8A)
 
 
 def test_pick_unknown_role():

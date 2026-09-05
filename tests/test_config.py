@@ -6,7 +6,7 @@ from wallglow import config
 def test_defaults_when_no_file(tmp_path):
     cfg = config.load_config(tmp_path / "missing.toml")
     assert cfg.role == "primary"
-    assert cfg.mode == "vivid"
+    assert cfg.mode == "faithful"
     assert cfg.brightness == 255
     assert cfg.fade_steps == 30
 

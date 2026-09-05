@@ -14,7 +14,7 @@ ROLES = {
     "tertiary": "mTertiary",
 }
 
-MODES = ("vivid", "raw")
+MODES = ("faithful", "vivid", "raw")
 
 
 def load(path: Path) -> dict[str, str]:
@@ -33,21 +33,42 @@ def to_hex(rgb: Rgb) -> str:
     return "#{:02x}{:02x}{:02x}".format(*rgb)
 
 
-def vivid(rgb: Rgb) -> Rgb:
-    """Same hue and saturation at mid lightness.
+# An LED strip cannot show a colour that is too dark, too pale, or too washed
+# out: it reads as off, as white, or as a dim smear. These bounds are the
+# window inside which the hue actually shows, tuned by eye against the strip.
+_MIN_LIGHT = 0.35
+_MAX_LIGHT = 0.72
+_MIN_SAT = 0.45
+_GREY_SAT = 0.05
 
-    Material palettes hand us tints (tone 80 in dark mode) or shades (tone 40
-    in light mode). An LED strip renders a tint as whitish and a shade as dim,
-    so we pull the lightness back to the middle, where the hue actually shows.
+
+def faithful(rgb: Rgb) -> Rgb:
+    """The palette colour as seen on screen, rescued only where a strip cannot show it.
+
+    Material tones run pale in dark mode and dark in light mode. We keep the
+    hue, lightness and saturation the palette chose, and clamp only the values
+    that would vanish on LEDs, so the strip stays close to the screen. True
+    greys are left alone rather than forced to a hue.
     """
-    h, _l, s = colorsys.rgb_to_hls(*(c / 255 for c in rgb))
-    return tuple(round(c * 255) for c in colorsys.hls_to_rgb(h, 0.5, s))
+    h, light, sat = colorsys.rgb_to_hls(*(c / 255 for c in rgb))
+    if sat > _GREY_SAT:
+        light = min(max(light, _MIN_LIGHT), _MAX_LIGHT)
+        sat = max(sat, _MIN_SAT)
+    return tuple(round(c * 255) for c in colorsys.hls_to_rgb(h, light, sat))
 
 
-def pick(palette: dict[str, str], role: str = "primary", mode: str = "vivid") -> Rgb:
-    key = ROLES[role]
-    rgb = parse_hex(palette[key])
-    return vivid(rgb) if mode == "vivid" else rgb
+def vivid(rgb: Rgb) -> Rgb:
+    """Same hue and saturation at mid lightness, for a bolder, less accurate look."""
+    h, _light, sat = colorsys.rgb_to_hls(*(c / 255 for c in rgb))
+    return tuple(round(c * 255) for c in colorsys.hls_to_rgb(h, 0.5, sat))
+
+
+_TRANSFORMS = {"faithful": faithful, "vivid": vivid, "raw": lambda rgb: rgb}
+
+
+def pick(palette: dict[str, str], role: str = "primary", mode: str = "faithful") -> Rgb:
+    rgb = parse_hex(palette[ROLES[role]])
+    return _TRANSFORMS[mode](rgb)
 
 
 def lerp(start: Rgb, end: Rgb, t: float) -> Rgb:
