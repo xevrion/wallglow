@@ -48,3 +48,36 @@ def test_state_round_trip_and_missing(tmp_path):
     assert config.load_state(path) == {}
     config.save_state({"color": "#00ff00"}, path)
     assert config.load_state(path) == {"color": "#00ff00"}
+
+
+def test_set_config_value_updates_existing_key(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('mode = "faithful"\nrole = "primary"\n')
+    config.set_config_value("mode", "vivid", path)
+    assert config.load_config(path).mode == "vivid"
+    assert config.load_config(path).role == "primary"
+
+
+def test_set_config_value_preserves_comments(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('mode = "faithful"  # matches screen\n')
+    config.set_config_value("mode", "vivid", path)
+    text = path.read_text()
+    assert "# matches screen" in text
+    assert 'mode = "vivid"' in text
+
+
+def test_set_config_value_appends_when_absent(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('role = "primary"\n')
+    config.set_config_value("mode", "raw", path)
+    assert config.load_config(path).mode == "raw"
+
+
+def test_set_config_value_rejects_bad_value(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('mode = "faithful"\n')
+    with pytest.raises(ValueError):
+        config.set_config_value("mode", "loud", path)
+    # the file is left untouched on rejection
+    assert config.load_config(path).mode == "faithful"

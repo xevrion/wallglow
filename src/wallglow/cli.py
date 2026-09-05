@@ -72,6 +72,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("off", help="power the strip off")
     p.set_defaults(run=cmd_off)
 
+    p = sub.add_parser("mode", help=f"show or set the colour mode {palette.MODES}")
+    p.add_argument("mode", nargs="?", choices=palette.MODES, help="omit to show the current mode")
+    p.set_defaults(run=cmd_mode)
+
+    p = sub.add_parser("role", help="show or set which palette colour to follow")
+    p.add_argument(
+        "role", nargs="?", choices=sorted(palette.ROLES), help="omit to show the current role"
+    )
+    p.set_defaults(run=cmd_role)
+
     p = sub.add_parser("status", help="show the daemon's connection and colour")
     p.set_defaults(run=cmd_status)
 
@@ -113,6 +123,28 @@ def cmd_off(_args: argparse.Namespace, cfg: config.Config) -> int:
     if _via_daemon({"command": "power", "on": False}):
         return 0
     return asyncio.run(_send_oneshot(cfg, [sp621e.power(False)]))
+
+
+def cmd_mode(args: argparse.Namespace, cfg: config.Config) -> int:
+    return _show_or_set(args, cfg, "mode", args.mode, cfg.mode)
+
+
+def cmd_role(args: argparse.Namespace, cfg: config.Config) -> int:
+    return _show_or_set(args, cfg, "role", args.role, cfg.role)
+
+
+def _show_or_set(
+    args: argparse.Namespace, cfg: config.Config, key: str, new: str | None, current: str
+) -> int:
+    if new is None:
+        log.info("%s is %s", key, current)
+        return 0
+    config.set_config_value(key, new, args.config)
+    log.info("%s set to %s", key, new)
+    # Apply it now so the change is visible without waiting for a wallpaper change.
+    return cmd_sync(
+        argparse.Namespace(dry_run=False, no_fade=False), config.load_config(args.config)
+    )
 
 
 def cmd_status(_args: argparse.Namespace, _cfg: config.Config) -> int:

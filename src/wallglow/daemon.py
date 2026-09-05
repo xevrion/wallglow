@@ -87,6 +87,9 @@ class Daemon:
             return {"ok": True}
         if command in ("color", "sync"):
             if command == "sync":
+                # Reload config each time so a `wallglow mode`/`role` change takes
+                # effect without restarting the daemon.
+                self.cfg = config.load_config()
                 colors = palette.load(self.cfg.palette)
                 target = palette.pick(colors, self.cfg.role, self.cfg.mode)
             else:

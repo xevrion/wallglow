@@ -48,11 +48,42 @@ class Config:
 def load_config(path: Path = CONFIG_PATH) -> Config:
     if not path.exists():
         return Config()
-    raw = tomllib.loads(path.read_text())
+    try:
+        return load_config_from_text(path.read_text())
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
+def set_config_value(key: str, value: str, path: Path = CONFIG_PATH) -> None:
+    """Set one string key in the TOML file, keeping the other lines and comments.
+
+    Validated by reloading afterwards, so a bad value raises before it sticks.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text().splitlines() if path.exists() else []
+    entry = f'{key} = "{value}"'
+    for i, line in enumerate(lines):
+        stripped = line.split("#", 1)[0].strip()
+        if stripped.startswith((f"{key} ", f"{key}=")):
+            comment = line[line.index("#") :] if "#" in line else ""
+            lines[i] = f"{entry}  {comment}".rstrip() if comment else entry
+            break
+    else:
+        lines.append(entry)
+    text = "\n".join(lines) + "\n"
+    tomllib.loads(text)  # syntax check
+    load_config_from_text(text)  # value validation
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+def load_config_from_text(text: str) -> Config:
+    raw = tomllib.loads(text)
     known = {f.name for f in fields(Config)}
     unknown = set(raw) - known
     if unknown:
-        raise ValueError(f"unknown keys in {path}: {sorted(unknown)}")
+        raise ValueError(f"unknown keys: {sorted(unknown)}")
     if "palette" in raw:
         raw["palette"] = Path(raw["palette"]).expanduser()
     return Config(**raw)

@@ -39,12 +39,26 @@ Optional, at `~/.config/wallglow/config.toml`. Every key has a default.
 ```toml
 address = "AA:BB:CC:DD:EE:FF"   # from `wallglow scan`; skips discovery
 role = "primary"                # primary | secondary | tertiary
-mode = "vivid"                  # vivid | raw
+mode = "faithful"               # faithful | vivid | raw
 brightness = 255                # 0..255
 fade_ms = 400
 step_ms = 50
 palette = "~/.config/noctalia/colors.json"
 ```
+
+### Colour mode
+
+Material palettes are made of pale tints and dark shades, so the same colour can read very differently on a strip. Three modes trade accuracy for punch:
+
+- `faithful` keeps the colour you see on screen, lifting only what is too dark or too washed out for LEDs. The default.
+- `vivid` pushes every colour to full strength, bolder but no longer matching the screen.
+- `raw` sends the exact palette hex, truest to Noctalia but pale colours look near-white.
+
+Switch any time, and it applies at once:
+
+    wallglow mode            # show the current mode
+    wallglow mode vivid      # change it and re-sync
+    wallglow role tertiary   # follow a different palette colour
 
 ## Instant changes: the daemon
 
