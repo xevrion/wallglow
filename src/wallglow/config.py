@@ -26,7 +26,7 @@ class Config:
     role: str = "primary"
     mode: str = "faithful"
     brightness: int = 255
-    fade_ms: int = 1500
+    fade_ms: int = 400
     step_ms: int = 50
     palette: Path = DEFAULT_PALETTE
 

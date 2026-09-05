@@ -1,4 +1,9 @@
-"""Command line entry point."""
+"""Command line entry point.
+
+Colour commands prefer a running daemon, which holds the Bluetooth connection
+open so the change is instant. With no daemon they fall back to a one-shot
+connection, which is correct but pays a connect on every call.
+"""
 
 from __future__ import annotations
 
@@ -12,21 +17,24 @@ from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
-from . import config, palette, sp621e
+from . import config, daemon, palette, sp621e
 
 log = logging.getLogger("wallglow")
-
-SCAN_TIMEOUT = 10.0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,
+    )
     try:
         cfg = config.load_config(args.config)
         if args.address:
             cfg = replace(cfg, address=args.address)
-        return asyncio.run(args.run(args, cfg))
+        return args.run(args, cfg)
     except (ValueError, OSError, ConnectionError) as exc:
         log.error("%s", exc)
         return 1
@@ -64,37 +72,66 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("off", help="power the strip off")
     p.set_defaults(run=cmd_off)
 
+    p = sub.add_parser("status", help="show the daemon's connection and colour")
+    p.set_defaults(run=cmd_status)
+
+    p = sub.add_parser("daemon", help="run the keep-alive service in the foreground")
+    p.set_defaults(run=cmd_daemon)
+
     p = sub.add_parser("scan", help="list BanlanX controllers in range")
     p.add_argument("--timeout", type=float, default=5.0)
     p.set_defaults(run=cmd_scan)
     return parser
 
 
-async def cmd_sync(args: argparse.Namespace, cfg: config.Config) -> int:
+def cmd_sync(args: argparse.Namespace, cfg: config.Config) -> int:
+    if _via_daemon({"command": "sync", "fade": not args.no_fade}, args.dry_run):
+        return 0
     try:
         colors = palette.load(cfg.palette)
         target = palette.pick(colors, cfg.role, cfg.mode)
     except KeyError as exc:
         raise ValueError(f"{cfg.palette} has no {exc} entry") from exc
-    return await apply(cfg, target, dry_run=args.dry_run, fade=not args.no_fade)
+    return asyncio.run(_apply_oneshot(cfg, target, dry_run=args.dry_run, fade=not args.no_fade))
 
 
-async def cmd_set(args: argparse.Namespace, cfg: config.Config) -> int:
-    return await apply(
-        cfg, palette.parse_hex(args.hex), dry_run=args.dry_run, fade=not args.no_fade
-    )
+def cmd_set(args: argparse.Namespace, cfg: config.Config) -> int:
+    target = palette.parse_hex(args.hex)
+    request = {"command": "color", "hex": palette.to_hex(target), "fade": not args.no_fade}
+    if _via_daemon(request, args.dry_run):
+        return 0
+    return asyncio.run(_apply_oneshot(cfg, target, dry_run=args.dry_run, fade=not args.no_fade))
 
 
-async def cmd_on(_args: argparse.Namespace, cfg: config.Config) -> int:
-    return await send(cfg, [sp621e.power(True)])
+def cmd_on(_args: argparse.Namespace, cfg: config.Config) -> int:
+    if _via_daemon({"command": "power", "on": True}):
+        return 0
+    return asyncio.run(_send_oneshot(cfg, [sp621e.power(True)]))
 
 
-async def cmd_off(_args: argparse.Namespace, cfg: config.Config) -> int:
-    return await send(cfg, [sp621e.power(False)])
+def cmd_off(_args: argparse.Namespace, cfg: config.Config) -> int:
+    if _via_daemon({"command": "power", "on": False}):
+        return 0
+    return asyncio.run(_send_oneshot(cfg, [sp621e.power(False)]))
 
 
-async def cmd_scan(args: argparse.Namespace, _cfg: config.Config) -> int:
-    found = await sp621e.scan(timeout=args.timeout)
+def cmd_status(_args: argparse.Namespace, _cfg: config.Config) -> int:
+    if not daemon.is_running():
+        log.info("daemon not running")
+        return 1
+    reply = daemon.send_request({"command": "status"})
+    where = "connected" if reply.get("connected") else "disconnected"
+    power = "on" if reply.get("power") else "off"
+    log.info("daemon %s, power %s, colour %s", where, power, reply.get("color") or "?")
+    return 0
+
+
+def cmd_daemon(_args: argparse.Namespace, cfg: config.Config) -> int:
+    return asyncio.run(daemon.Daemon(cfg).run())
+
+
+def cmd_scan(args: argparse.Namespace, _cfg: config.Config) -> int:
+    found = asyncio.run(sp621e.scan(timeout=args.timeout))
     if not found:
         log.info("no BanlanX controller seen; is it powered on with the app closed?")
         return 1
@@ -104,32 +141,54 @@ async def cmd_scan(args: argparse.Namespace, _cfg: config.Config) -> int:
     return 0
 
 
-async def apply(cfg: config.Config, target: palette.Rgb, *, dry_run: bool, fade: bool) -> int:
+def _via_daemon(request: dict, dry_run: bool = False) -> bool:
+    """Send to the daemon if one is up. Returns True when it handled the request."""
+    if dry_run or not daemon.is_running():
+        return False
+    try:
+        reply = daemon.send_request(request)
+    except (OSError, ValueError) as exc:
+        log.debug("daemon unreachable (%s); falling back to a direct connection", exc)
+        return False
+    if not reply.get("ok"):
+        raise ValueError(reply.get("error", "daemon rejected the request"))
+    if reply.get("color"):
+        log.info("%s (via daemon)", reply["color"])
+    return True
+
+
+async def _apply_oneshot(
+    cfg: config.Config, target: palette.Rgb, *, dry_run: bool, fade: bool
+) -> int:
     state = config.load_state()
     previous = palette.parse_hex(state["color"]) if fade and "color" in state else None
-    if previous is not None and previous != target:
-        path = palette.steps(previous, target, cfg.fade_steps)
-    else:
-        path = [target]
+    ramp = (
+        palette.steps(previous, target, cfg.fade_steps)
+        if previous and previous != target
+        else [target]
+    )
     setup = [sp621e.power(True), sp621e.effect(sp621e.EFFECT_SOLID)]
-    ramp = [sp621e.color(rgb, cfg.brightness) for rgb in path]
+    frames = [sp621e.color(rgb, cfg.brightness) for rgb in ramp]
 
-    log.info("target %s (%d frames)", palette.to_hex(target), len(ramp))
+    log.info("target %s (%d frames)", palette.to_hex(target), len(frames))
     if dry_run:
-        for frame in setup + ramp:
+        for frame in setup + frames:
             print(frame.hex())
         return 0
-
-    gap = cfg.step_ms / 1000 if len(ramp) > 1 else 0.0
-    address = await send(cfg, setup, ramp, gap=gap)
+    gap = cfg.step_ms / 1000 if len(frames) > 1 else 0.0
+    address = await _connect_and_send(cfg, setup, frames, gap=gap)
     config.save_state({"color": palette.to_hex(target), "address": address})
     return 0
 
 
-async def send(cfg: config.Config, *batches: list[bytes], gap: float = 0.0) -> str:
-    """Connect once, write each batch (the last one paced by ``gap``), return the address."""
+async def _send_oneshot(cfg: config.Config, frames: list[bytes]) -> int:
+    await _connect_and_send(cfg, frames)
+    return 0
+
+
+async def _connect_and_send(cfg: config.Config, *batches: list[bytes], gap: float = 0.0) -> str:
     with _lock():
-        device = await sp621e.find(cfg.address, timeout=SCAN_TIMEOUT)
+        device = await sp621e.find(cfg.address, timeout=sp621e.CONNECT_SCAN_TIMEOUT)
         if device is None:
             raise ConnectionError(
                 "no SP621E found; is it powered on, in range, and is the banlanX app closed?"
@@ -137,14 +196,14 @@ async def send(cfg: config.Config, *batches: list[bytes], gap: float = 0.0) -> s
         log.debug("using %s at %s", device.name, device.address)
         async with sp621e.Strip(device) as strip:
             for i, frames in enumerate(batches):
-                await strip.send(frames, gap=gap if i == len(batches) - 1 else 0.0)
+                await strip.send(frames, gap=gap if i == len(batches) - 1 else 0.0, ack=i == 0)
     return device.address
 
 
 @contextlib.contextmanager
 def _lock() -> Iterator[None]:
-    # Two hook invocations racing for the controller's single connection both
-    # fail; the second one waiting here costs a couple of seconds instead.
+    # With no daemon, two hook invocations racing for the controller's single
+    # connection both fail; the second waiting here costs a couple of seconds.
     path = config.STATE_PATH.with_name("lock")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:

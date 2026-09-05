@@ -9,6 +9,7 @@ connection at a time, so the phone app has to be closed while we talk to it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Self
@@ -23,6 +24,10 @@ WRITE_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
 
 # Bluetooth SIG company IDs seen in SP6xxE advertisements. 20563 is 0x5053, "SP".
 MANUFACTURER_IDS = (20563, 5053)
+
+# Discovery is skipped entirely when an address is configured; this bounds the
+# scan used only when it is not.
+CONNECT_SCAN_TIMEOUT = 10.0
 
 EFFECT_SOLID = 0xBE
 EFFECT_WHITE = 0xBF
@@ -136,10 +141,16 @@ async def find(address: str | None, timeout: float = 10.0) -> BLEDevice | None:
 class Strip:
     """One connection to the controller, used as an async context manager."""
 
-    def __init__(self, device: BLEDevice, attempts: int = 3) -> None:
+    def __init__(self, device: BLEDevice | str, attempts: int = 3) -> None:
+        # A bare address lets BlueZ connect to a device it already knows even
+        # when it is not currently advertising, which a fresh BLEDevice needs.
         self.device = device
         self.attempts = attempts
         self._client: BleakClient | None = None
+
+    @property
+    def address(self) -> str:
+        return self.device if isinstance(self.device, str) else self.device.address
 
     async def __aenter__(self) -> Self:
         await self.connect()
@@ -149,15 +160,17 @@ class Strip:
         await self.disconnect()
 
     async def connect(self) -> None:
+        # A link BlueZ already holds (a stale connection left by a killed process,
+        # or an auto-reconnect) deadlocks a fresh connect: it returns InProgress
+        # and BlueZ shows Connected while the new client never does. Clearing that
+        # link first lets the connect below start from the clean state that works.
+        await self._clear_stale_link()
         last: BleakError | None = None
         for attempt in range(1, self.attempts + 1):
             client = BleakClient(self.device, timeout=20.0)
             try:
                 await client.connect()
             except BleakError as exc:
-                # A previous connection to these controllers can still be tearing
-                # down in BlueZ, so the first attempt returns InProgress at once;
-                # that needs a longer wait for BlueZ to settle than a plain miss.
                 last = exc
                 if client.is_connected:
                     self._client = client
@@ -168,7 +181,18 @@ class Strip:
                 continue
             self._client = client
             return
-        raise ConnectionError(f"could not connect to {self.device.address}: {last}")
+        raise ConnectionError(f"could not connect to {self.address}: {last}")
+
+    async def _clear_stale_link(self) -> None:
+        """Drop any connection BlueZ is already holding to this address.
+
+        Bleak's disconnect on a not-yet-connected client asks BlueZ to tear the
+        device down, which is a no-op when nothing is connected and the fix when
+        something stale is.
+        """
+        with contextlib.suppress(BleakError, EOFError, AttributeError):
+            await BleakClient(self.device, timeout=10.0).disconnect()
+            await asyncio.sleep(0.5)
 
     async def disconnect(self) -> None:
         if self._client is not None:
@@ -189,6 +213,15 @@ class Strip:
             await self._client.write_gatt_char(WRITE_UUID, frame, response=ack)
             if gap:
                 await asyncio.sleep(max(0.0, due - loop.time()))
+
+    @property
+    def is_connected(self) -> bool:
+        return self._client is not None and self._client.is_connected
+
+    async def ensure_connected(self) -> None:
+        if not self.is_connected:
+            self._client = None
+            await self.connect()
 
     async def query_status(self, timeout: float = 3.0) -> Status:
         if self._client is None:

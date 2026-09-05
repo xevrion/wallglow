@@ -28,8 +28,9 @@ Close the banlanX app on your phone first. These controllers accept one Bluetoot
     wallglow set ff6600      # any rrggbb colour
     wallglow sync            # push the current Noctalia palette colour
     wallglow off
+    wallglow status          # daemon connection and current colour
 
-`sync` and `set` fade from the previous colour over 1.5 seconds. Add `--no-fade` to jump, or `--dry-run` to print the frames without touching Bluetooth.
+`sync` and `set` fade from the previous colour over a fraction of a second. Add `--no-fade` to jump, or `--dry-run` to print the frames without touching Bluetooth.
 
 ## Configuration
 
@@ -40,10 +41,37 @@ address = "AA:BB:CC:DD:EE:FF"   # from `wallglow scan`; skips discovery
 role = "primary"                # primary | secondary | tertiary
 mode = "vivid"                  # vivid | raw
 brightness = 255                # 0..255
-fade_ms = 1500
+fade_ms = 400
 step_ms = 50
 palette = "~/.config/noctalia/colors.json"
 ```
+
+## Instant changes: the daemon
+
+Each `wallglow` run connects, writes, and disconnects, which costs about a second. That is fine for the odd manual change, but a wallpaper hook that fires it every time feels laggy, and rapid changes pile up because each waits for the last connection to finish.
+
+The daemon fixes this the way the phone app does: it holds one Bluetooth connection open and applies each new colour the instant it arrives, in well under a fifth of a second. Run it once,
+
+    wallglow daemon
+
+and from then on `sync`, `set`, `on` and `off` talk to it over a local socket and return immediately, falling back to a direct connection only if it is not running. A colour that arrives mid-fade cancels the fade, so flipping through wallpapers quickly lands on the last one rather than playing every colour in between.
+
+To keep it running across logins, install it as a user service. Create `~/.config/systemd/user/wallglow.service`:
+
+```ini
+[Unit]
+Description=wallglow LED daemon
+After=bluetooth.target
+
+[Service]
+ExecStart=%h/.local/bin/wallglow daemon
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user enable --now wallglow`. Check it with `wallglow status`.
 
 ## Hooking into Noctalia
 
