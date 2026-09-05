@@ -138,6 +138,30 @@ async def find(address: str | None, timeout: float = 10.0) -> BLEDevice | None:
     )
 
 
+async def _bluez_disconnect(address: str) -> bool:
+    """Ask BlueZ to disconnect the device at ``address``. Returns True if it did.
+
+    Talks to BlueZ over the system bus directly (via dbus-fast, already a bleak
+    dependency) so it can clear a link any process opened, which bleak's own
+    disconnect cannot. A no-op when nothing is connected. Linux/BlueZ only.
+    """
+    from dbus_fast import BusType
+    from dbus_fast.aio import MessageBus
+
+    path = "/org/bluez/hci0/dev_" + address.upper().replace(":", "_")
+    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    try:
+        introspection = await bus.introspect("org.bluez", path)
+        obj = bus.get_proxy_object("org.bluez", path, introspection)
+        device = obj.get_interface("org.bluez.Device1")
+        if not await device.get_connected():
+            return False
+        await device.call_disconnect()
+        return True
+    finally:
+        bus.disconnect()
+
+
 class Strip:
     """One connection to the controller, used as an async context manager."""
 
@@ -184,15 +208,16 @@ class Strip:
         raise ConnectionError(f"could not connect to {self.address}: {last}")
 
     async def _clear_stale_link(self) -> None:
-        """Drop any connection BlueZ is already holding to this address.
+        """Drop any connection BlueZ already holds to this address.
 
-        Bleak's disconnect on a not-yet-connected client asks BlueZ to tear the
-        device down, which is a no-op when nothing is connected and the fix when
-        something stale is.
+        A link left by a killed process deadlocks a fresh connect, and bleak's
+        own disconnect cannot clear a link it never opened. Calling BlueZ's
+        Disconnect over D-Bus does, whichever process created it. Best effort:
+        if BlueZ is unreachable or the device is unknown, connect() still tries.
         """
-        with contextlib.suppress(BleakError, EOFError, AttributeError):
-            await BleakClient(self.device, timeout=10.0).disconnect()
-            await asyncio.sleep(0.5)
+        with contextlib.suppress(Exception):
+            if await _bluez_disconnect(self.address):
+                await asyncio.sleep(1.0)
 
     async def disconnect(self) -> None:
         if self._client is not None:
