@@ -82,8 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(run=cmd_role)
 
-    p = sub.add_parser("status", help="show the daemon's connection and colour")
+    p = sub.add_parser("status", help="show connection, colour, mode and role")
     p.set_defaults(run=cmd_status)
+
+    p = sub.add_parser("reconnect", help="try to (re)connect to the strip now")
+    p.set_defaults(run=cmd_reconnect)
 
     p = sub.add_parser("daemon", help="run the keep-alive service in the foreground")
     p.set_defaults(run=cmd_daemon)
@@ -147,14 +150,46 @@ def _show_or_set(
     )
 
 
-def cmd_status(_args: argparse.Namespace, _cfg: config.Config) -> int:
+def cmd_status(_args: argparse.Namespace, cfg: config.Config) -> int:
     if not daemon.is_running():
-        log.info("daemon not running")
+        log.info("daemon not running; mode %s, role %s", cfg.mode, cfg.role)
         return 1
     reply = daemon.send_request({"command": "status"})
     where = "connected" if reply.get("connected") else "disconnected"
     power = "on" if reply.get("power") else "off"
-    log.info("daemon %s, power %s, colour %s", where, power, reply.get("color") or "?")
+    log.info(
+        "daemon %s, power %s, colour %s, mode %s, role %s",
+        where,
+        power,
+        reply.get("color") or "?",
+        reply.get("mode", cfg.mode),
+        reply.get("role", cfg.role),
+    )
+    return 0
+
+
+def cmd_reconnect(_args: argparse.Namespace, cfg: config.Config) -> int:
+    if daemon.is_running():
+        reply = daemon.send_request({"command": "reconnect"})
+        if reply.get("connected"):
+            log.info("already connected")
+        else:
+            log.info("reconnecting; check `wallglow status` in a moment")
+        return 0
+    # No daemon: prove a direct connection works, then drop it.
+    log.info("no daemon running; testing a direct connection")
+    return asyncio.run(_reconnect_oneshot(cfg))
+
+
+async def _reconnect_oneshot(cfg: config.Config) -> int:
+    device = await sp621e.find(cfg.address, timeout=sp621e.CONNECT_SCAN_TIMEOUT)
+    target = device if device is not None else cfg.address
+    if not target:
+        raise ConnectionError("no SP621E found and no address configured")
+    strip = sp621e.Strip(target)
+    await strip.connect()
+    log.info("connected to %s", strip.address)
+    await strip.disconnect()
     return 0
 
 

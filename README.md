@@ -27,10 +27,14 @@ Close the banlanX app on your phone first. These controllers accept one Bluetoot
     wallglow scan            # find the controller and print its address
     wallglow set ff6600      # any rrggbb colour
     wallglow sync            # push the current Noctalia palette colour
-    wallglow off
-    wallglow status          # daemon connection and current colour
+    wallglow on              # power on
+    wallglow off             # power off
+    wallglow status          # connection, colour, mode and role
+    wallglow reconnect       # try to (re)connect to the strip now
+    wallglow mode vivid      # change the colour mode (see below)
+    wallglow role tertiary   # follow a different palette colour
 
-`sync` and `set` fade from the previous colour over a fraction of a second. Add `--no-fade` to jump, or `--dry-run` to print the frames without touching Bluetooth.
+`sync` and `set` fade from the previous colour over a fraction of a second. Add `--no-fade` to jump, or `--dry-run` to print the frames without touching Bluetooth. Run `wallglow --help`, or `wallglow <command> --help`, for the full list.
 
 ## Configuration
 

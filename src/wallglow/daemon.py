@@ -80,7 +80,15 @@ class Daemon:
                 "connected": self._strip is not None and self._strip.is_connected,
                 "power": self._power,
                 "color": palette.to_hex(self._current) if self._current else None,
+                "mode": self.cfg.mode,
+                "role": self.cfg.role,
+                "address": self.cfg.address,
             }
+        if command == "reconnect":
+            # The maintenance loop reconnects on its own; nudging the wake event
+            # is enough to make a serve_requests iteration notice a dropped link.
+            self._wake.set()
+            return {"ok": True, "connected": self._strip is not None and self._strip.is_connected}
         if command == "power":
             self._power = bool(request["on"])
             self._request(self._current if self._power else None)
