@@ -41,7 +41,7 @@ role = "primary"                # primary | secondary | tertiary
 mode = "vivid"                  # vivid | raw
 brightness = 255                # 0..255
 fade_ms = 1500
-step_ms = 60
+step_ms = 50
 palette = "~/.config/noctalia/colors.json"
 ```
 

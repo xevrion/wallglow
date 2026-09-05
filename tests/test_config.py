@@ -8,7 +8,7 @@ def test_defaults_when_no_file(tmp_path):
     assert cfg.role == "primary"
     assert cfg.mode == "vivid"
     assert cfg.brightness == 255
-    assert cfg.fade_steps == 25
+    assert cfg.fade_steps == 30
 
 
 def test_reads_and_expands_paths(tmp_path):

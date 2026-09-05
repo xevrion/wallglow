@@ -30,3 +30,30 @@ def test_bytes_out_of_range_are_rejected(bad):
 
 def test_state_query_frame():
     assert sp621e.state_query() == bytes.fromhex("a07000")
+
+
+def test_status_reassembles_two_packets_from_a_real_capture():
+    asm = sp621e.StatusAssembler()
+    asm.feed(bytes.fromhex("534301170f0100be02ff0a10ff005e0110090b14"))
+    assert not asm.done.is_set()
+    asm.feed(bytes.fromhex("53430217081a32375373851b00"))
+    assert asm.done.is_set()
+    status = sp621e.Status.parse(asm.payload)
+    assert status.power is True
+    assert status.effect == sp621e.EFFECT_SOLID
+    assert status.brightness == 255
+    assert status.speed == 10
+    assert status.length == 16
+    assert status.rgb == (0xFF, 0x00, 0x5E)
+
+
+def test_status_ignores_noise_and_stray_continuations():
+    asm = sp621e.StatusAssembler()
+    asm.feed(b"\x00\x01")
+    asm.feed(bytes.fromhex("53430217081a32375373851b00"))
+    assert not asm.done.is_set()
+
+
+def test_status_parse_rejects_short_payload():
+    with pytest.raises(ValueError):
+        sp621e.Status.parse(b"\x01\x00\xbe")

@@ -27,7 +27,7 @@ class Config:
     mode: str = "vivid"
     brightness: int = 255
     fade_ms: int = 1500
-    step_ms: int = 60
+    step_ms: int = 50
     palette: Path = DEFAULT_PALETTE
 
     def __post_init__(self) -> None:

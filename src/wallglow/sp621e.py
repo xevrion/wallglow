@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Self
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
-from bleak.exc import BleakError
+from bleak.exc import BleakDBusError, BleakError
 
 SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
 WRITE_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
@@ -27,6 +28,65 @@ EFFECT_SOLID = 0xBE
 EFFECT_WHITE = 0xBF
 
 Rgb = tuple[int, int, int]
+
+STATUS_MAGIC = b"\x53\x43"
+
+
+@dataclass(frozen=True)
+class Status:
+    power: bool
+    effect: int
+    brightness: int
+    speed: int
+    length: int
+    rgb: Rgb
+
+    @classmethod
+    def parse(cls, payload: bytes) -> Status:
+        """Decode the reassembled reply to :func:`state_query`.
+
+        Layout per UniLED: power, loop, effect, chip order, brightness, speed,
+        effect length, then red, green, blue. Later bytes are audio settings,
+        firmware identification and timers, which we do not need.
+        """
+        if len(payload) < 10:
+            raise ValueError(f"status payload too short: {payload.hex()}")
+        return cls(
+            power=bool(payload[0]),
+            effect=payload[2],
+            brightness=payload[4],
+            speed=payload[5],
+            length=payload[6],
+            rgb=(payload[7], payload[8], payload[9]),
+        )
+
+
+class StatusAssembler:
+    """Collects the notification packets one status reply is split across.
+
+    Each packet is ``53 43 <n> <total> <len>`` followed by ``len`` payload
+    bytes; ``total`` is the payload length of the whole message.
+    """
+
+    def __init__(self) -> None:
+        self._parts: list[bytes] = []
+        self._total = 0
+        self.done = asyncio.Event()
+        self.payload = b""
+
+    def feed(self, packet: bytes) -> None:
+        if len(packet) < 5 or packet[:2] != STATUS_MAGIC:
+            return
+        number, total, length = packet[2], packet[3], packet[4]
+        if number == 1:
+            self._parts, self._total = [], total
+        elif not self._parts:
+            return
+        self._parts.append(packet[5 : 5 + length])
+        joined = b"".join(self._parts)
+        if len(joined) >= self._total:
+            self.payload = joined[: self._total]
+            self.done.set()
 
 
 def power(on: bool) -> bytes:
@@ -91,15 +151,20 @@ class Strip:
     async def connect(self) -> None:
         last: BleakError | None = None
         for attempt in range(1, self.attempts + 1):
-            client = BleakClient(self.device, timeout=15.0)
+            client = BleakClient(self.device, timeout=20.0)
             try:
                 await client.connect()
             except BleakError as exc:
-                # BlueZ regularly aborts the first attempt to these controllers
-                # with "le-connection-abort-by-local"; a retry almost always lands.
+                # A previous connection to these controllers can still be tearing
+                # down in BlueZ, so the first attempt returns InProgress at once;
+                # that needs a longer wait for BlueZ to settle than a plain miss.
                 last = exc
+                if client.is_connected:
+                    self._client = client
+                    return
                 if attempt < self.attempts:
-                    await asyncio.sleep(1.0)
+                    settle = 2.5 if isinstance(exc, BleakDBusError) else 1.0
+                    await asyncio.sleep(settle)
                 continue
             self._client = client
             return
@@ -110,13 +175,29 @@ class Strip:
             await self._client.disconnect()
             self._client = None
 
-    async def send(self, frames: Iterable[bytes], gap: float = 0.0) -> None:
-        """Write each frame, spacing them ``gap`` seconds apart including write time."""
+    async def send(self, frames: Iterable[bytes], gap: float = 0.0, ack: bool = True) -> None:
+        """Write each frame, spacing them ``gap`` seconds apart including write time.
+
+        Acknowledged writes take about 110 ms on this controller, too slow for
+        a smooth fade; unacknowledged ones go out every 40 ms without loss.
+        """
         if self._client is None:
             raise ConnectionError("not connected")
         loop = asyncio.get_running_loop()
         for frame in frames:
             due = loop.time() + gap
-            await self._client.write_gatt_char(WRITE_UUID, frame, response=True)
+            await self._client.write_gatt_char(WRITE_UUID, frame, response=ack)
             if gap:
                 await asyncio.sleep(max(0.0, due - loop.time()))
+
+    async def query_status(self, timeout: float = 3.0) -> Status:
+        if self._client is None:
+            raise ConnectionError("not connected")
+        assembler = StatusAssembler()
+        await self._client.start_notify(WRITE_UUID, lambda _c, data: assembler.feed(bytes(data)))
+        try:
+            await self._client.write_gatt_char(WRITE_UUID, state_query(), response=True)
+            await asyncio.wait_for(assembler.done.wait(), timeout)
+        finally:
+            await self._client.stop_notify(WRITE_UUID)
+        return Status.parse(assembler.payload)
